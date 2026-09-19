@@ -37,7 +37,7 @@ def get_function_name(definition: str):
 class TemplateMeta:
     def __init__(self, entry_point: str, version: str, template_hash: str,
                  created_at: str, compiler: str, architecture: str, compilation_time: float,
-                 dependencies: list=None):
+                 dependencies: list=None, source_map: dict=None):
         self.entry_point = entry_point
         self.version = version
         self.template_hash = template_hash
@@ -46,6 +46,8 @@ class TemplateMeta:
         self.architecture = architecture
         self.compilation_time = compilation_time
         self.dependencies = dependencies or []
+        # Maps generated file line numbers back to template source lines.
+        self.source_map = source_map or {}
 
     @classmethod
     def load_from_path(cls, path: str):

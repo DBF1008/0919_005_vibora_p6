@@ -1,4 +1,5 @@
-from typing import Dict
+from contextlib import contextmanager
+from typing import Dict, List, Tuple
 from .ast import merge, raise_nodes, resolve_include_nodes
 from .exceptions import TemplateNotFound, ConflictingNames
 from .nodes import ExtendsNode, MacroNode
@@ -54,6 +55,48 @@ class TemplateEngine:
                 pass
         self.cache.remove(template.hash)
 
+    @contextmanager
+    def transaction(self):
+        """
+        Atomic context for template loading. Any exception raised inside the
+        block restores every piece of engine state (registered templates,
+        compiled templates and cache entries) to its pre-transaction snapshot,
+        so a failed batch never leaves partial side effects behind.
+
+        :return:
+        """
+        templates_snapshot = dict(self.templates)
+        compiled_snapshot = dict(self.compiled_templates)
+        cached_templates_snapshot = dict(self.cache.loaded_templates)
+        cached_metas_snapshot = dict(self.cache.loaded_metas)
+        try:
+            yield self
+        except Exception:
+            self.templates.clear()
+            self.templates.update(templates_snapshot)
+            self.compiled_templates.clear()
+            self.compiled_templates.update(compiled_snapshot)
+            self.cache.loaded_templates.clear()
+            self.cache.loaded_templates.update(cached_templates_snapshot)
+            self.cache.loaded_metas.clear()
+            self.cache.loaded_metas.update(cached_metas_snapshot)
+            raise
+
+    def add_templates(self, templates: List[Tuple[Template, list]]) -> List[ParsedTemplate]:
+        """
+        Atomically adds a batch of (template, names) tuples. Either every
+        template is registered or, on any failure (conflicting names, invalid
+        tags, etc), the engine is rolled back to its previous state.
+
+        :param templates:
+        :return:
+        """
+        with self.transaction():
+            parsed_templates = []
+            for template, names in templates:
+                parsed_templates.append(self.add_template(template, names=names))
+            return parsed_templates
+
     def add_template(self, template: Template, names: list) -> ParsedTemplate:
         """
 
@@ -62,14 +105,15 @@ class TemplateEngine:
         :return:
         """
         template = self.template_parser.parse(template)
-        missing_names = 0
-        for name in names:
-            if name not in self.templates:
-                self.templates[name] = template
-            else:
-                missing_names += 1
-                if missing_names == len(names):
-                    raise ConflictingNames('This template needs a unique name because imports are name based.')
+        # Two-phase registration: conflicts are detected before any mutation
+        # so a failed call never leaves the engine in a partial state.
+        available_names = [name for name in names if name not in self.templates]
+        if not available_names:
+            raise ConflictingNames('This template needs a unique name because imports are name based.')
+        for name in available_names:
+            self.templates[name] = template
+        if not hasattr(template, 'origin'):
+            template.origin = available_names[0]
         return template
 
     async def render(self, name: str, streaming: bool=False, **template_vars):
@@ -164,14 +208,18 @@ class TemplateEngine:
             if any([x for x in meta.dependencies if x not in updated_hashes]):
                 self.cache.remove(template_hash)
 
-    def compile_templates(self, verbose=False):
+    def compile_templates(self, verbose=False, templates: list=None):
         """
 
         :param verbose:
+        :param templates: Optional subset of templates to (re)compile. When
+        omitted every registered template is considered. Passing only the
+        changed templates allows cheap incremental recompiles.
         :return:
         """
+        targets = templates if templates is not None else self.templates.values()
         # Checking if all dependencies are met
-        for template in self.templates.values():
+        for template in targets:
 
             # Trying to load the compiled version from cache,
             # if not possible then let's call the compiler to build this template.
